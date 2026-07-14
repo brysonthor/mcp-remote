@@ -10,7 +10,7 @@ import {
   mcpProxy,
   parseCommandLineArgs,
   setupSignalHandlers
-} from "./chunk-7U5DXR5B.js";
+} from "./chunk-75LICWFK.js";
 
 // src/proxy.ts
 import { EventEmitter } from "events";

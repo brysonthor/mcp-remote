@@ -20477,6 +20477,20 @@ async function discoverOAuthServerInfo(serverUrl, headers = {}) {
     wwwAuthenticateScope
   };
 }
+function propagateResourceMetadata(from, to) {
+  const source = from;
+  const dest = to;
+  if (!source?._resourceMetadataUrl || dest._resourceMetadataUrl) {
+    return;
+  }
+  dest._resourceMetadataUrl = source._resourceMetadataUrl;
+  if (source._scope && !dest._scope) {
+    dest._scope = source._scope;
+  }
+  debugLog("Propagated resource_metadata URL from probe transport for finishAuth", {
+    resourceMetadataUrl: String(source._resourceMetadataUrl)
+  });
+}
 async function connectToRemoteServer(client, serverUrl, authProvider, headers, authInitializer, transportStrategy = "http-first", recursionReasons = /* @__PURE__ */ new Set()) {
   log(`[${pid}] Connecting to remote server: ${serverUrl}`);
   const url2 = new URL(serverUrl);
@@ -20506,6 +20520,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
     authProvider,
     requestInit: { headers }
   });
+  let testTransport;
   try {
     debugLog("Attempting to connect to remote server", { sseTransport });
     if (client) {
@@ -20516,7 +20531,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
       await transport.start();
       if (!sseTransport) {
         debugLog("Creating test transport for HTTP-only connection test");
-        const testTransport = new StreamableHTTPClientTransport(url2, { authProvider, requestInit: { headers } });
+        testTransport = new StreamableHTTPClientTransport(url2, { authProvider, requestInit: { headers } });
         const testClient = new Client({ name: "mcp-remote-fallback-test", version: "0.0.0" }, { capabilities: {} });
         await testClient.connect(testTransport);
       }
@@ -20564,6 +20579,7 @@ async function connectToRemoteServer(client, serverUrl, authProvider, headers, a
       debugLog("Received auth code from callback server");
       try {
         log("Completing authorization...");
+        propagateResourceMetadata(testTransport, transport);
         await transport.finishAuth(code);
         debugLog("Authorization completed successfully");
         if (recursionReasons.has(REASON_AUTH_NEEDED)) {

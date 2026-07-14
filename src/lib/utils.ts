@@ -377,6 +377,38 @@ export type AuthInitializer = () => Promise<{
 }>
 
 /**
+ * Shape of the (internal) MCP SDK transport fields that carry OAuth discovery state
+ * learned from a 401 WWW-Authenticate response. These are not part of the public
+ * transport type, so we describe them here to copy them between transport instances.
+ */
+type OAuthDiscoveryCarrier = {
+  _resourceMetadataUrl?: URL | string
+  _scope?: string
+}
+
+/**
+ * Copies the resource_metadata URL (and scope) that a probe transport learned from a 401
+ * onto the transport that will run finishAuth(). No-op if the source has nothing to give
+ * or the destination already has a resource_metadata URL.
+ * @param from The transport that received the 401 (may be undefined)
+ * @param to The transport that will perform the token exchange
+ */
+function propagateResourceMetadata(from: unknown, to: unknown): void {
+  const source = from as OAuthDiscoveryCarrier | undefined
+  const dest = to as OAuthDiscoveryCarrier
+  if (!source?._resourceMetadataUrl || dest._resourceMetadataUrl) {
+    return
+  }
+  dest._resourceMetadataUrl = source._resourceMetadataUrl
+  if (source._scope && !dest._scope) {
+    dest._scope = source._scope
+  }
+  debugLog('Propagated resource_metadata URL from probe transport for finishAuth', {
+    resourceMetadataUrl: String(source._resourceMetadataUrl),
+  })
+}
+
+/**
  * Creates and connects to a remote server with OAuth authentication
  * @param client The client to connect with
  * @param serverUrl The URL of the remote server
@@ -436,6 +468,10 @@ export async function connectToRemoteServer(
         requestInit: { headers },
       })
 
+  // Kept in scope so the catch block below can recover the resource_metadata URL the
+  // probe transport learned from the 401 (see the finishAuth propagation note below).
+  let testTransport: StreamableHTTPClientTransport | undefined
+
   try {
     debugLog('Attempting to connect to remote server', { sseTransport })
 
@@ -451,7 +487,7 @@ export async function connectToRemoteServer(
         // the client is already connected. So let's just create a one-off client to make a single request and figure
         // out if we're actually talking to an HTTP server or not.
         debugLog('Creating test transport for HTTP-only connection test')
-        const testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
+        testTransport = new StreamableHTTPClientTransport(url, { authProvider, requestInit: { headers } })
         const testClient = new Client({ name: 'mcp-remote-fallback-test', version: '0.0.0' }, { capabilities: {} })
         await testClient.connect(testTransport)
       }
@@ -524,6 +560,19 @@ export async function connectToRemoteServer(
 
       try {
         log('Completing authorization...')
+
+        // The MCP SDK captures the resource_metadata URL from the 401 WWW-Authenticate header
+        // onto the transport instance and reuses it inside finishAuth() to discover the
+        // authorization server (and therefore the token endpoint). In the proxy path
+        // (client === null over HTTP) the 401 is received by the throwaway `testTransport`,
+        // but finishAuth() runs on `transport`, which never saw a 401 and so has no
+        // resource_metadata URL. Without it the SDK can't locate the Protected Resource
+        // Metadata during the token exchange, falls back to the server origin as the auth
+        // server, and POSTs the authorization code to `<origin>/token` — the wrong token
+        // endpoint. Propagate the URL (and scope) the probe transport learned so the token
+        // request targets the authorization server's real token_endpoint.
+        propagateResourceMetadata(testTransport, transport)
+
         await transport.finishAuth(code)
         debugLog('Authorization completed successfully')
 
